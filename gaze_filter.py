@@ -1,10 +1,9 @@
-from numpy import mean
-from numpy.linalg import norm
-import math
+from functools import reduce
+from math import pi, sqrt
 
 
 def smoothing_factor(t_e, cutoff):
-    r = 2 * math.pi * cutoff * t_e
+    r = 2 * pi * cutoff * t_e
     return r / (r + 1)
 
 
@@ -67,14 +66,13 @@ class IvtFilter:
             self.init(t, x, y)
             return x, y
 
-        # print("params", x - self.fixation[0], y - self.fixation[1], t - self.t_prev)
-        # print('norm and vth', norm([x - self.fixation[0], y - self.fixation[1]]) / (t - self.t_prev), self.v_threshold)
-
-        if norm([x - self.fixation[0], y - self.fixation[1]]) / (t - self.t_prev) >= self.v_threshold:
+        if sqrt((x - self.fixation[0]) ** 2 + (y - self.fixation[1]) ** 2) / (t - self.t_prev) >= self.v_threshold:
             self.init(t, x, y)
         else:
             self.gaze_points_prev.append((x, y))
-            self.fixation: tuple[float, float] = mean(self.gaze_points_prev, axis=0)
+
+            fixation = reduce(lambda acc, cur: (acc[0] + cur[0], acc[1] + cur[1]), self.gaze_points_prev, (0.0, 0.0))
+            self.fixation: tuple[float, float] = (fixation[0] / len(self.gaze_points_prev), fixation[1] / len(self.gaze_points_prev))
 
         self.t_prev = t
 
