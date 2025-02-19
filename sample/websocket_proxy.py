@@ -1,7 +1,9 @@
 import asyncio
 import json
-# import websockets
+import websockets.http11
 from websockets.asyncio.server import serve
+
+websockets.http11.MAX_LINE_LENGTH = 16384
 
 socket_server_port = 12345
 websocket_server_port = 8765
