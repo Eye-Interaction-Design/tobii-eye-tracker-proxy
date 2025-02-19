@@ -55,14 +55,16 @@ class GazeActions:
 
             while not stop_event.is_set():
                 gaze_point = tracker.get_gaze_point()
-                if gaze_point:
-                    print(f"{int(gaze_point[0])},{int(gaze_point[1])}")
+
+                if not gaze_point:
+                    continue
+
+                timestamp = time()
+                print(f"Tobii Eye Tracker ({timestampe}): ({int(gaze_point[0])},{int(gaze_point[1])})")
 
                 # Send to socket
                 if client_socket:
                     try:
-                        timestamp = time()
-
                         x0 = oe_filter_x(timestamp, gaze_point[0])
                         y0 = oe_filter_y(timestamp, gaze_point[1])
                         fp = ivt_filter(timestamp, x0, y0)
@@ -72,7 +74,6 @@ class GazeActions:
                         y = int(fp[1])
 
                         data = f"{t},1,{x},{y}"
-                        print(data)
                         client_socket.sendto(data.encode(), (server_ip, server_port))
 
                     except Exception as e:
