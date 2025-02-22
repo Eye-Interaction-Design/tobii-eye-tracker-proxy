@@ -1,115 +1,102 @@
-import threading
-import sys
-from pathlib import Path
-from time import time, sleep
+from dataclasses import asdict
+import json
 import socket
+from threading import Event, Thread, Lock
+from time import sleep
 
-from .gaze_filter import OneEuroFilter, IvtFilter
+from talon import app, Module
+from .eye_tracker import TobiiEyeTracker
 
-from talon import Module
 
-subtree_dir = Path(__file__).parent / ".subtrees"
-package_paths = [
-    str(subtree_dir / "gaze-ocr"),
-    str(subtree_dir / "screen-ocr"),
-    str(subtree_dir / "rapidfuzz/src"),
-    str(subtree_dir / "jarowinkler/src"),
-]
-saved_path = sys.path.copy()
-try:
-    sys.path.extend([path for path in package_paths if path not in sys.path])
-    import gaze_ocr
-    import gaze_ocr.talon
-finally:
-    sys.path = saved_path.copy()
+# Set up the server to listen on all interfaces.
+server_ip = 'localhost'
+server_port = 12344
 
-mod = Module()
+tracker = TobiiEyeTracker()
 
-stop_event = threading.Event()
-gaze_thread = None
+# Create a UDP socket and bind it to the specified IP and port.
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+server_socket.bind((server_ip, server_port))
 
-client_socket = None
-server_ip = '127.0.0.1'
-server_port = 12345
+terminate_event = Event()
 
-[oe_filter_x, oe_filter_y, ivt_filter] = [OneEuroFilter(), OneEuroFilter(), IvtFilter(v_threshold=3)]
+# A thread-safe set to keep track of registered clients (each as a tuple (IP, port)).
+clients = set()
+clients_lock = Lock()
+
+
+def registration_listener():
+    """
+    Listen for registration messages from clients.
+    When any message is received, add the sender's address to the clients set.
+    """
+    while not terminate_event.is_set():
+        try:
+            # Set a timeout so we can periodically check for termination.
+            server_socket.settimeout(1.0)
+            data, addr = server_socket.recvfrom(1024)
+            # Simply register the client's address.
+            with clients_lock:
+                if addr not in clients:
+                    print(f"Registered client: {addr}")
+                    clients.add(addr)
+        except socket.timeout:
+            continue
+        except Exception as e:
+            print(f"Error in registration listener: {e}")
+
+
+def eye_tracker_listener(tracker: TobiiEyeTracker, sock: socket.socket, terminate_event: Event):
+    """
+    Subscribe to the Tobii eye tracker, filter gaze data,
+    and send the JSON data via UDP to all registered clients.
+    """
+
+    while not terminate_event.is_set():
+        frame = tracker.now
+
+        if frame:
+            try:
+                # Construct the JSON data.
+                data = json.dumps(asdict(frame))
+                print(data)
+
+                # Send the JSON data to all registered clients.
+                with clients_lock:
+                    for client_addr in clients:
+                        try:
+                            sock.sendto(data.encode(), client_addr)
+                        except Exception as send_e:
+                            print(f"Error sending to {client_addr}: {send_e}")
+            except Exception as e:
+                print(f"Error in subscribe_tobii: {e}")
+
+        sleep(1 / 100)
+
+
+registration_thread = Thread(target=registration_listener, daemon=True)
+gaze_thread = Thread(target=eye_tracker_listener, args=(tracker, server_socket, terminate_event))
+
 
 def on_ready():
-    global tracker, client_socket
-    tracker = gaze_ocr.talon.TalonEyeTracker()
+    terminate_event.clear()
+    # Start the registration listener thread (daemon thread so it stops with the main program).
+    registration_thread.start()
+    # Start the gaze data subscription and sending thread.
+    gaze_thread.start()
 
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+app.register("ready", on_ready)
 
 
+mod = Module()
 @mod.action_class
 class GazeActions:
-    def send_gaze_point(offset_right: int = 0, offset_down: int = 0):
+    def start_listening() -> None:
         """Send the gaze point to the server"""
         on_ready()
-        global gaze_thread, stop_event, client_socket
 
-        def run_gaze_loop():
-            """Run the loop in a separate thread"""
-            count = 0
-            start_time = time()
-
-            while not stop_event.is_set():
-                gaze_point = tracker.get_gaze_point()
-
-                if not gaze_point:
-                    continue
-
-                timestamp = time()
-                print(f"Tobii Eye Tracker ({timestampe}): ({int(gaze_point[0])},{int(gaze_point[1])})")
-
-                # Send to socket
-                if client_socket:
-                    try:
-                        x0 = oe_filter_x(timestamp, gaze_point[0])
-                        y0 = oe_filter_y(timestamp, gaze_point[1])
-                        fp = ivt_filter(timestamp, x0, y0)
-
-                        t = int(timestamp * 1000)
-                        x = int(fp[0])
-                        y = int(fp[1])
-
-                        data = f"{t},1,{x},{y}"
-                        client_socket.sendto(data.encode(), (server_ip, server_port))
-
-                    except Exception as e:
-                        print(f"Error sending data: {e}")
-
-                sleep(1/110)
-                count += 1
-
-            end_time = time()
-            elapsed_time = end_time - start_time
-
-            if elapsed_time > 0:
-                sampling_frequency = count / elapsed_time
-                print(f"Loop count: {count}")
-                print(f"Elapsed time: {elapsed_time:.2f} seconds")
-                print(f"Sampling frequency: {sampling_frequency:.2f} loops/sec")
-            else:
-                print("The elapsed time was too short to calculate the sampling frequency.")
-
-            # Close the socket connection
-            if client_socket:
-                client_socket.close()
-
-        # Create and start the thread
-        stop_event.clear()
-        gaze_thread = threading.Thread(target=run_gaze_loop)
-        gaze_thread.start()
-
-    def stop_sending_gaze_point():
+    def stop_listening() -> None:
         """Stop sending the gaze point to the server"""
-        global gaze_thread, stop_event
-
-        if gaze_thread is not None and gaze_thread.is_alive():
-            print("Stop request")
-            stop_event.set()
-            gaze_thread.join()
-            print("Tracking completely stopped")
-        else:
-            print("Thread is not running.")
+        terminate_event.set()
+        gaze_thread.join()
+        registration_thread.join()
