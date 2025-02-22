@@ -1,8 +1,0 @@
-[run]
-plugins = Cython.Coverage
-source = src
-omit =
-    src/cpp_common.pxd
-
-[precision]
-show_missing = true
